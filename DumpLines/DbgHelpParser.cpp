@@ -96,6 +96,18 @@ bool DbgHelpParser::LoadPdbFile(const std::string& pdbFilePath)
         return false;
     }
 
+    // Compute source files
+    if (!ComputeSourceFiles())
+    {
+        return false;
+    }
+
+    // Compute tokens
+    if (!ComputeTokens())
+    {
+        return false;
+    }
+
     return true;
 }
 
@@ -104,14 +116,17 @@ BOOL CALLBACK DbgHelpParser::EnumMethodSymbolsCallback(PSYMBOL_INFO pSymInfo, UL
     DbgHelpParser* parser = reinterpret_cast<DbgHelpParser*>(UserContext);
 
     if (
-        (pSymInfo->Tag == SymTagFunction) &&
-        ((pSymInfo->Flags & (SYMFLAG_CLR_TOKEN | SYMFLAG_METADATA)) == (SYMFLAG_CLR_TOKEN | SYMFLAG_METADATA))
+        (pSymInfo->Tag == SymTagFunction)
+        //&& ((pSymInfo->Flags & (SYMFLAG_CLR_TOKEN | SYMFLAG_METADATA)) == (SYMFLAG_CLR_TOKEN | SYMFLAG_METADATA))
         )
     {
         MethodInfo info;
         info.name = pSymInfo->Name;
+        info.modBase = pSymInfo->ModBase;
         info.address = pSymInfo->Address;
         info.size = pSymInfo->Size;
+        info.rva = static_cast<uint32_t>(pSymInfo->Address - info.modBase);
+        info.index = pSymInfo->Index;
 
         // Try to get source file and line information
         IMAGEHLP_LINE64 line = { 0 };
@@ -160,4 +175,82 @@ bool DbgHelpParser::ComputeMethodsInfo()
 std::vector<MethodInfo> DbgHelpParser::GetMethods()
 {
     return _methods;
+}
+
+BOOL CALLBACK DbgHelpParser::EnumSourceFilesCallback(PSOURCEFILE pSourceFile, PVOID UserContext)
+{
+    DbgHelpParser* parser = reinterpret_cast<DbgHelpParser*>(UserContext);
+
+    if (pSourceFile && pSourceFile->FileName)
+    {
+        parser->_sourceFiles.push_back(pSourceFile->FileName);
+    }
+
+    return TRUE; // Continue enumeration
+}
+
+bool DbgHelpParser::ComputeSourceFiles()
+{
+    if (!SymEnumSourceFiles(
+            _hProcess,
+            _baseAddress,
+            "*",  // Mask (all source files)
+            EnumSourceFilesCallback,
+            this  // User context to store the source files in _sourceFiles instance field
+    ))
+    {
+        return false;
+    }
+
+    // Sort alphabetically
+    std::sort(_sourceFiles.begin(), _sourceFiles.end());
+
+    return true;
+}
+
+std::vector<std::string> DbgHelpParser::GetSourceFiles()
+{
+    return _sourceFiles;
+}
+
+bool DbgHelpParser::ComputeTokens()
+{
+    // Allocate buffer for SYMBOL_INFO
+    const size_t bufferSize = sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR);
+    BYTE buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
+    PSYMBOL_INFO pSymInfo = (PSYMBOL_INFO)buffer;
+
+    // Start from token 1 and increment until SymFromToken returns false
+    ULONG token = 1;
+    while (true)
+    {
+        memset(buffer, 0, bufferSize);
+        pSymInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
+        pSymInfo->MaxNameLen = MAX_SYM_NAME;
+
+        if (!SymFromToken(_hProcess, _baseAddress, token, pSymInfo))
+        {
+            // No more tokens
+            break;
+        }
+
+        TokenInfo info;
+        info.token = token;
+        info.index = pSymInfo->Index;
+        info.flags = pSymInfo->Flags;
+        info.value = pSymInfo->Value;
+        info.address = pSymInfo->Address;
+        info.tag = pSymInfo->Tag;
+        info.name = pSymInfo->Name ? pSymInfo->Name : "";
+
+        _tokens.push_back(info);
+        token++;
+    }
+
+    return true;
+}
+
+std::vector<TokenInfo> DbgHelpParser::GetTokens()
+{
+    return _tokens;
 }

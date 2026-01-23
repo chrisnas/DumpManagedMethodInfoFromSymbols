@@ -1,21 +1,19 @@
 #pragma once
 
 #include <windows.h>
-
-// needed for symTag definitions
-#define _NO_CVCONST_H
-#include "DbgHelp.h"
-
+#include <cor.h>
+#include <CorHdr.h>
+#include <corsym.h>
 #include <string>
 #include <vector>
 #include "PdbCommon.h"
 
-
-class DbgHelpParser
+// Parser that uses ISymUnmanagedReader COM interface to read PDB files
+class SymPdbParser
 {
 public:
-    DbgHelpParser();
-    ~DbgHelpParser();
+    SymPdbParser();
+    ~SymPdbParser();
 
     bool LoadPdbFile(const std::string& pdbFilePath);
     std::vector<MethodInfo> GetMethods();
@@ -25,21 +23,18 @@ public:
     DWORD GetAge() const { return _age; }
 
 private:
-    static BOOL CALLBACK EnumMethodSymbolsCallback(PSYMBOL_INFO pSymInfo, ULONG SymbolSize, PVOID UserContext);
-    static BOOL CALLBACK EnumSourceFilesCallback(PSOURCEFILE pSourceFile, PVOID UserContext);
     bool ComputeMethodsInfo();
     bool ComputeSourceFiles();
     bool ComputeTokens();
+    bool GetMethodInfoFromSymbol(ISymUnmanagedMethod* pMethod, MethodInfo& info);
 
 private:
-    HANDLE _hProcess;
-    uint64_t _baseAddress;
-
+    ISymUnmanagedReader* _pReader;
+    IMetaDataImport* _pMetaDataImport;
     std::vector<MethodInfo> _methods;
     std::vector<std::string> _sourceFiles;
     std::vector<TokenInfo> _tokens;
     std::string _guid;
     DWORD _age;
-
+    std::string _pdbFilePath;
 };
-

@@ -125,9 +125,12 @@
   <ItemGroup>
     <ClCompile Include="DbgHelpParser.cpp" />
     <ClCompile Include="DumpLines.cpp" />
+    <ClCompile Include="SymPdbParser.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DbgHelpParser.h" />
+    <ClInclude Include="PdbCommon.h" />
+    <ClInclude Include="SymPdbParser.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
