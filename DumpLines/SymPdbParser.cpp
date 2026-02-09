@@ -85,12 +85,8 @@ bool SymPdbParser::LoadPdbFile(const std::string& pdbFilePath)
         return false; // Cannot find corresponding assembly file
     }
 
-    // Convert paths to wide strings
-    int len = MultiByteToWideChar(CP_ACP, 0, pdbFilePath.c_str(), -1, NULL, 0);
-    std::wstring wPdbPath(len, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, pdbFilePath.c_str(), -1, &wPdbPath[0], len);
-
-    len = MultiByteToWideChar(CP_ACP, 0, moduleFilePath.c_str(), -1, NULL, 0);
+    // Convert path to wide strings
+    int len = MultiByteToWideChar(CP_ACP, 0, moduleFilePath.c_str(), -1, NULL, 0);
     std::wstring wModulePath(len, L'\0');
     MultiByteToWideChar(CP_ACP, 0, moduleFilePath.c_str(), -1, &wModulePath[0], len);
 
@@ -161,6 +157,7 @@ bool SymPdbParser::LoadPdbFile(const std::string& pdbFilePath)
     _age = 0;
 
     // Compute method info
+    //if (!ComputeMethodsInfoByTypes())
     if (!ComputeMethodsInfo())
     {
         return false;
@@ -305,6 +302,10 @@ bool SymPdbParser::GetMethodInfoFromSymbol(ISymUnmanagedMethod* pMethod, MethodI
             }
         }
     }
+    else
+    {
+        // No sequence points, so no source info
+    }
 
     if (info.sourceFile.empty())
     {
@@ -315,34 +316,192 @@ bool SymPdbParser::GetMethodInfoFromSymbol(ISymUnmanagedMethod* pMethod, MethodI
     return true;
 }
 
+
+const uint32_t LAST_METHODDEF_TOKEN = 0x00010000;
 bool SymPdbParser::ComputeMethodsInfo()
 {
-    if (_pReader == nullptr)
+    if (_pReader == nullptr || _pMetaDataImport == nullptr)
     {
         return false;
     }
 
     HRESULT hr;
+    ULONG cRows = 0;
 
-    // Try to enumerate all method tokens
-    // Since we don't have direct access to all methods, we'll try a range of common tokens
-    // This is a workaround since ISymUnmanagedReader doesn't have a direct EnumMethods API
-    for (ULONG32 token = 0x06000001; token < 0x06010000; token++)
+    // Get IMetaDataTables interface to query the MethodDef table
+    CComPtr<IMetaDataTables> pTables;
+    hr = _pMetaDataImport->QueryInterface(IID_IMetaDataTables, (void**)&pTables);
+    if (FAILED(hr) || pTables == nullptr)
     {
-        ISymUnmanagedMethod* pMethod = nullptr;
+        cRows = LAST_METHODDEF_TOKEN;
+    }
+    else
+    {
+        // Get the number of rows in the MethodDef table (table index 0x06 = Method)
+        hr = pTables->GetTableInfo(
+            0x06,           // MethodDef table
+            NULL,           // cbRow (not needed)
+            &cRows,         // pcRows (number of methods)
+            NULL,           // pcCols (not needed)
+            NULL,           // piKey (not needed)
+            NULL            // ppName (not needed)
+        );
+
+        if (FAILED(hr))
+        {
+            cRows = LAST_METHODDEF_TOKEN;
+        }
+    }
+
+    // Iterate through all method tokens based on actual table size
+    // Method tokens start at 0x06000001 (RID 1 in table 0x06)
+    for (uint32_t i = 1; i <= cRows; i++)
+    {
+        mdMethodDef token = TokenFromRid(i, mdtMethodDef);
+
+        CComPtr<ISymUnmanagedMethod> pMethod;
         hr = _pReader->GetMethod(token, &pMethod);
-        if (SUCCEEDED(hr))
+        if (SUCCEEDED(hr) && pMethod != nullptr)
         {
             MethodInfo info;
             if (GetMethodInfoFromSymbol(pMethod, info))
             {
                 _methods.push_back(info);
             }
-            pMethod->Release();
+        }
+        else  // No symbol info, but get method name from metadata
+        {
+            MethodInfo info;
+            info.index = token;
+            info.modBase = 0;
+            info.address = 0;
+            info.size = 0;
+            info.rva = token;
+            info.sourceFile = "";
+            info.lineNumber = 0;
+
+            // Get method name from metadata
+            WCHAR methodName[1024];
+            ULONG cchMethodName = 0;
+            mdTypeDef classToken = 0;
+            DWORD methodAttr = 0;
+            PCCOR_SIGNATURE sigBlob = nullptr;
+            ULONG sigBlobSize = 0;
+            ULONG codeRVA = 0;
+            DWORD implFlags = 0;
+
+            hr = _pMetaDataImport->GetMethodProps(
+                token,
+                &classToken,
+                methodName,
+                1024,
+                &cchMethodName,
+                &methodAttr,
+                &sigBlob,
+                &sigBlobSize,
+                &codeRVA,
+                &implFlags
+            );
+
+            if (SUCCEEDED(hr))
+            {
+                // Convert method name to narrow string
+                int len = WideCharToMultiByte(CP_UTF8, 0, methodName, -1, NULL, 0, NULL, NULL);
+                std::string narrowMethodName(len - 1, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, methodName, -1, &narrowMethodName[0], len, NULL, NULL);
+                info.name = narrowMethodName;
+
+                _methods.push_back(info);
+            }
+            else
+            {
+                // Fallback to token if we can't get the name
+                std::ostringstream oss;
+                oss << "0x" << std::hex << std::setw(8) << std::setfill('0') << token;
+                info.name = oss.str();
+                _methods.push_back(info);
+            }
         }
     }
 
     // NOTE: methods are by design sorted by token
+
+    return true;
+}
+
+bool SymPdbParser::ComputeMethodsInfoByTypes()
+{
+    if (_pReader == nullptr || _pMetaDataImport == nullptr)
+    {
+        return false;
+    }
+
+    HRESULT hr;
+
+    // Enumerate all types in the assembly using metadata
+    HCORENUM hTypeEnum = NULL;
+    mdTypeDef typeDefs[256];
+    ULONG typeCount = 0;
+
+    do
+    {
+        hr = _pMetaDataImport->EnumTypeDefs(&hTypeEnum, typeDefs, 256, &typeCount);
+        if (FAILED(hr))
+        {
+            break;
+        }
+
+        // For each type, enumerate its methods
+        for (ULONG i = 0; i < typeCount; i++)
+        {
+            HCORENUM hMethodEnum = NULL;
+            mdMethodDef methodDefs[256];
+            ULONG methodCount = 0;
+
+            do
+            {
+                hr = _pMetaDataImport->EnumMethods(&hMethodEnum, typeDefs[i], methodDefs, 256, &methodCount);
+                if (FAILED(hr))
+                {
+                    break;
+                }
+
+                // For each method, try to get symbol information from the PDB
+                for (ULONG j = 0; j < methodCount; j++)
+                {
+                    CComPtr<ISymUnmanagedMethod> pMethod;
+                    hr = _pReader->GetMethod(methodDefs[j], &pMethod);
+                    if (SUCCEEDED(hr) && pMethod != nullptr)
+                    {
+                        MethodInfo info;
+                        if (GetMethodInfoFromSymbol(pMethod, info))
+                        {
+                            _methods.push_back(info);
+                        }
+                    }
+                }
+
+            } while (methodCount > 0);
+
+            if (hMethodEnum != NULL)
+            {
+                _pMetaDataImport->CloseEnum(hMethodEnum);
+            }
+        }
+
+    } while (typeCount > 0);
+
+    if (hTypeEnum != NULL)
+    {
+        _pMetaDataImport->CloseEnum(hTypeEnum);
+    }
+
+    // Sort by token/RID
+    std::sort(_methods.begin(), _methods.end(),
+        [](const MethodInfo& a, const MethodInfo& b)
+        {
+            return a.index < b.index;
+        });
 
     return true;
 }

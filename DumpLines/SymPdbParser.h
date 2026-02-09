@@ -24,6 +24,7 @@ public:
 
 private:
     bool ComputeMethodsInfo();
+    bool ComputeMethodsInfoByTypes();
     bool ComputeSourceFiles();
     bool ComputeTokens();
     bool GetMethodInfoFromSymbol(ISymUnmanagedMethod* pMethod, MethodInfo& info);

@@ -203,9 +203,11 @@ int main(int argc, char* argv[])
             return -3;
         }
 
+        printf("Methods (%zu total)\n\n", methods.size());
+        printf("%s\n", std::string(75, '-').c_str());
         printf("%-32s | %-10s | %s\n",
             "Method Name", "Token", "Source Location");
-        printf("%s\n", std::string(67, '-').c_str());
+        printf("%s\n", std::string(75, '-').c_str());
 
         for (const MethodInfo& sym : methods)
         {
